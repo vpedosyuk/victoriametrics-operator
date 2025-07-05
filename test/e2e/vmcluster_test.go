@@ -11,6 +11,7 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
@@ -1244,6 +1245,159 @@ up{baz="bar"} 123
 							assertAnnotationsOnObjects(ctx, nss, objectsToAssert, expectedAnnotations)
 							assertLabelsOnObjects(ctx, nss, objectsToAssert, expectedLabels)
 						}
+					},
+				},
+			),
+			Entry("by updating vmstorage with MaxUnavailable 2", "update-maxunavailable-2",
+				&vmv1beta1.VMCluster{
+					Spec: vmv1beta1.VMClusterSpec{
+						RetentionPeriod: "1",
+						VMStorage: &vmv1beta1.VMStorage{
+							CommonApplicationDeploymentParams: vmv1beta1.CommonApplicationDeploymentParams{
+								ReplicaCount: ptr.To[int32](5),
+							},
+							PodMetadata: &vmv1beta1.EmbeddedObjectMetadata{
+								Labels: map[string]string{"version": "old"},
+							},
+							RollingUpdateStrategyBehavior: &vmv1beta1.StatefulSetUpdateStrategyBehavior{
+								MaxUnavailable: ptr.To(intstr.FromInt32(2)),
+							},
+						},
+						VMSelect: &vmv1beta1.VMSelect{
+							CommonApplicationDeploymentParams: vmv1beta1.CommonApplicationDeploymentParams{
+								ReplicaCount: ptr.To[int32](1),
+							},
+						},
+						VMInsert: &vmv1beta1.VMInsert{
+							CommonApplicationDeploymentParams: vmv1beta1.CommonApplicationDeploymentParams{
+								ReplicaCount: ptr.To[int32](1),
+							},
+						},
+					},
+				},
+				testStep{
+					modify: func(cr *vmv1beta1.VMCluster) {
+						By("triggering a rolling update by changing a pod label")
+						cr.Spec.VMStorage.PodMetadata.Labels["version"] = "new"
+					},
+					verify: func(cr *vmv1beta1.VMCluster) {
+						By("verifying that no more than 2 pods are unavailable at any time")
+						Consistently(func() error {
+							podList := &corev1.PodList{}
+							k8sClient.List(ctx, podList, &client.ListOptions{
+								Namespace:     namespace,
+								LabelSelector: labels.SelectorFromSet(cr.VMStorageSelectorLabels()),
+							})
+							podsUnavailable := 0
+							for _, pod := range podList.Items {
+								if pod.Status.Phase != corev1.PodRunning && pod.Labels["version"] == "old" {
+									podsUnavailable++
+								}
+							}
+							if podsUnavailable > 2 {
+								return fmt.Errorf("more than 2 pods are unavailable: %d", podsUnavailable)
+							}
+							return nil
+						}, eventualStatefulsetAppReadyTimeout).Should(Succeed())
+					},
+				},
+			),
+			Entry("by updating vmstorage with MaxUnavailable 100%", "update-maxunavailable-100-percent",
+				&vmv1beta1.VMCluster{
+					Spec: vmv1beta1.VMClusterSpec{
+						RetentionPeriod: "1",
+						VMStorage: &vmv1beta1.VMStorage{
+							CommonApplicationDeploymentParams: vmv1beta1.CommonApplicationDeploymentParams{
+								ReplicaCount: ptr.To[int32](5),
+							},
+							PodMetadata: &vmv1beta1.EmbeddedObjectMetadata{
+								Labels: map[string]string{"version": "old"},
+							},
+							RollingUpdateStrategyBehavior: &vmv1beta1.StatefulSetUpdateStrategyBehavior{
+								MaxUnavailable: ptr.To(intstr.FromString("100%")),
+							},
+						},
+						VMSelect: &vmv1beta1.VMSelect{
+							CommonApplicationDeploymentParams: vmv1beta1.CommonApplicationDeploymentParams{
+								ReplicaCount: ptr.To[int32](1),
+							},
+						},
+						VMInsert: &vmv1beta1.VMInsert{
+							CommonApplicationDeploymentParams: vmv1beta1.CommonApplicationDeploymentParams{
+								ReplicaCount: ptr.To[int32](1),
+							},
+						},
+					},
+				},
+				testStep{
+					modify: func(cr *vmv1beta1.VMCluster) {
+						By("triggering a rolling update by changing a pod label")
+						cr.Spec.VMStorage.PodMetadata.Labels["version"] = "new"
+					},
+					verify: func(cr *vmv1beta1.VMCluster) {
+						By("verifying that no pods are running with old version")
+						Consistently(func() error {
+							podList := &corev1.PodList{}
+							k8sClient.List(ctx, podList, &client.ListOptions{
+								Namespace:     namespace,
+								LabelSelector: labels.SelectorFromSet(cr.VMStorageSelectorLabels()),
+							})
+							for _, pod := range podList.Items {
+								if pod.Status.Phase == corev1.PodRunning && pod.Labels["version"] == "old" {
+									return fmt.Errorf("pod %s is running with old version", pod.Name)
+								}
+							}
+							return nil
+						}, eventualStatefulsetAppReadyTimeout).Should(Succeed())
+					},
+				},
+			),
+			Entry("by updating vmstorage with MaxUnavailable 100%% but limited by a PDB", "update-maxunavailable-100-percent-pdb",
+				&vmv1beta1.VMCluster{
+					Spec: vmv1beta1.VMClusterSpec{
+						RetentionPeriod: "1",
+						VMStorage: &vmv1beta1.VMStorage{
+							CommonApplicationDeploymentParams: vmv1beta1.CommonApplicationDeploymentParams{
+								ReplicaCount: ptr.To[int32](5),
+							},
+							PodMetadata: &vmv1beta1.EmbeddedObjectMetadata{
+								Labels: map[string]string{"version": "old"},
+							},
+							RollingUpdateStrategyBehavior: &vmv1beta1.StatefulSetUpdateStrategyBehavior{
+								MaxUnavailable: ptr.To(intstr.FromString("100%")),
+							},
+							PodDisruptionBudget: &vmv1beta1.EmbeddedPodDisruptionBudgetSpec{
+								MinAvailable: ptr.To(intstr.FromInt32(4)),
+							},
+						},
+						VMSelect: &vmv1beta1.VMSelect{
+							CommonApplicationDeploymentParams: vmv1beta1.CommonApplicationDeploymentParams{
+								ReplicaCount: ptr.To[int32](1),
+							},
+						},
+						VMInsert: &vmv1beta1.VMInsert{
+							CommonApplicationDeploymentParams: vmv1beta1.CommonApplicationDeploymentParams{
+								ReplicaCount: ptr.To[int32](1),
+							},
+						},
+					},
+				},
+				testStep{
+					modify: func(cr *vmv1beta1.VMCluster) {
+						By("triggering a rolling update by changing a pod label")
+						cr.Spec.VMStorage.PodMetadata.Labels["version"] = "new"
+					},
+					verify: func(cr *vmv1beta1.VMCluster) {
+						By("verifying that PodDisruptionBudget is respected and at least 4 pods are healthy at any time")
+						var pdb policyv1.PodDisruptionBudget
+						Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: cr.GetVMStorageName()}, &pdb)).To(Succeed())
+						Expect(pdb.Status.ExpectedPods).Should(BeNumerically("==", 5))
+						Expect(pdb.Status.DesiredHealthy).Should(BeNumerically("==", 4))
+						Consistently(func() int32 {
+							var pdb policyv1.PodDisruptionBudget
+							k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: cr.GetVMStorageName()}, &pdb)
+							return pdb.Status.CurrentHealthy
+						}, eventualStatefulsetAppReadyTimeout).Should(BeNumerically(">=", 4))
 					},
 				},
 			),
